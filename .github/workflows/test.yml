@@ -1,0 +1,83 @@
+name: Test AnyCommand Windows Server
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Run setup script
+      run: python setup.py
+    
+    - name: Check for sensitive files
+      run: |
+        if (Test-Path "firebase-service-account.json") {
+          Write-Error "Sensitive file firebase-service-account.json found in repository"
+          exit 1
+        }
+        Write-Host "No sensitive files found"
+    
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Test imports
+      run: |
+        python -c "import remote_server; print('remote_server imported successfully')"
+        python -c "import server_gui; print('server_gui imported successfully')"
+        python -c "import screen_share_service; print('screen_share_service imported successfully')"
+        python -c "import file_transfer_service; print('file_transfer_service imported successfully')"
+        python -c "import clipboard_service; print('clipboard_service imported successfully')"
+    
+    - name: Check documentation
+      run: |
+        if (-not (Test-Path "README.md")) { exit 1 }
+        if (-not (Test-Path "LICENSE")) { exit 1 }
+        if (-not (Test-Path "CONTRIBUTING.md")) { exit 1 }
+        Write-Host "All documentation files present"
+    
+    - name: Validate requirements.txt
+      run: |
+        pip install -r requirements.txt --dry-run
+    
+    - name: Check file structure
+      run: |
+        $required_files = @(
+          "remote_server.py",
+          "server_gui.py", 
+          "requirements.txt",
+          "README.md",
+          "LICENSE",
+          "setup.py"
+        )
+        
+        foreach ($file in $required_files) {
+          if (-not (Test-Path $file)) {
+            Write-Error "Required file $file not found"
+            exit 1
+          }
+        }
+        Write-Host "All required files present" 

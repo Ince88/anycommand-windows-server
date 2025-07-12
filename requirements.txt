@@ -1,0 +1,10 @@
+pywin32>=306
+pyautogui>=0.9.54
+keyboard>=0.13.5
+customtkinter>=5.2.2
+websockets>=15.0.1
+Pillow>=11.1.0
+pystray>=0.19.5
+psutil>=5.9.0
+pyperclip>=1.9.0
+pynput>=1.7.6 

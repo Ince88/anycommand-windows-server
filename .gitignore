@@ -1,0 +1,60 @@
+# Sensitive files
+firebase-service-account.json
+*.key
+*.pem
+*.p12
+*.pfx
+config.ini
+secrets.json
+
+# Logs
+*.log
+logs/
+
+# Build files
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.spec
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python virtual environment
+venv/
+env/
+ENV/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+
+# User data
+preferences.ini
+preferences.json
+paired_devices.json
+remote_server.log
+server.log
+server_error.log
+
+# Installer files
+*.exe
+*.msi
+*.bat
+
+# Assets that might contain sensitive data
+assets/private/
+assets/config/ 
