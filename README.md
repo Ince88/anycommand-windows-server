@@ -1,5 +1,9 @@
 # AnyCommand Windows Companion Server
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-blue.svg)](https://www.microsoft.com/windows)
+
 A powerful Windows companion server that enables remote control of your Windows PC from mobile devices. This server provides screen sharing, file transfer, clipboard synchronization, and gamepad emulation capabilities.
 
 ## Features
