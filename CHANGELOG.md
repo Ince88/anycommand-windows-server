@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated requirements.txt with version constraints
 - Improved .gitignore for security
 
+### Fixed
+- Fixed CustomTkinter canvas error that prevented application startup
+- Added missing numpy dependency for screen_share_service
+- Added missing winreg import for autostart functionality
+- Properly initialized window_thumbnails_service
+- Improved error handling for icon creation with PIL fallback
+- Added fallback emoji icons when image creation fails
+
 ### Security
 - Removed hardcoded API keys and credentials
 - Added template files for configuration
