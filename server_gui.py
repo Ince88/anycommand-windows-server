@@ -27,7 +27,9 @@ from pystray import Icon as TrayIcon, Menu as TrayMenu, MenuItem as TrayMenuItem
 from PIL import Image, ImageDraw
 import shutil
 from file_transfer_service import FileTransferService
+from window_thumbnails_service import WindowThumbnailsService
 import webbrowser
+import winreg
 
 # Update mutex name
 MUTEX_NAME = "Global\\AnyCommandServer_SingleInstance"
@@ -138,15 +140,18 @@ class ServerGUI(ctk.CTk):
         
         # Status icons
         icon_size = (24, 24)
-        network_icon = self.create_icon("\uf1eb", "#7EB6FF", icon_size)  # WiFi icon
-        key_icon = self.create_icon("\uf084", "#FFD166", icon_size)      # Key icon
-        status_icon = self.create_icon("\uf058", "#4CAF50", icon_size)   # Check icon
+        network_icon = self.create_icon("🌐", "#7EB6FF", icon_size)  # Network icon
+        key_icon = self.create_icon("🔑", "#FFD166", icon_size)      # Key icon
+        status_icon = self.create_icon("✅", "#4CAF50", icon_size)   # Check icon
         
         # IP Address
         ip_row = ctk.CTkFrame(status_container, fg_color="transparent")
         ip_row.pack(fill="x", pady=(8, 4))  # Reduced padding
         
-        ctk.CTkLabel(ip_row, image=network_icon, text="").pack(side="left", padx=(0, 15))
+        if network_icon:
+            ctk.CTkLabel(ip_row, image=network_icon, text="").pack(side="left", padx=(0, 15))
+        else:
+            ctk.CTkLabel(ip_row, text="🌐", font=self.normal_font).pack(side="left", padx=(0, 15))
         ctk.CTkLabel(ip_row, text="IP Address:", width=100, anchor="w", font=self.normal_font).pack(side="left")
         
         self.ip_label = ctk.CTkLabel(
@@ -165,7 +170,10 @@ class ServerGUI(ctk.CTk):
         pin_row = ctk.CTkFrame(status_container, fg_color="transparent")
         pin_row.pack(fill="x", pady=(8, 4))  # Reduced padding
         
-        ctk.CTkLabel(pin_row, image=key_icon, text="").pack(side="left", padx=(0, 15))
+        if key_icon:
+            ctk.CTkLabel(pin_row, image=key_icon, text="").pack(side="left", padx=(0, 15))
+        else:
+            ctk.CTkLabel(pin_row, text="🔑", font=self.normal_font).pack(side="left", padx=(0, 15))
         ctk.CTkLabel(pin_row, text="PIN Code:", width=100, anchor="w", font=self.normal_font).pack(side="left")
         
         self.pin_label = ctk.CTkLabel(
@@ -184,7 +192,10 @@ class ServerGUI(ctk.CTk):
         status_row = ctk.CTkFrame(main_container, fg_color="transparent")
         status_row.pack(fill="x", pady=(0, 8))  # Reduced padding
         
-        ctk.CTkLabel(status_row, image=status_icon, text="").pack(side="left", padx=(0, 15))
+        if status_icon:
+            ctk.CTkLabel(status_row, image=status_icon, text="").pack(side="left", padx=(0, 15))
+        else:
+            ctk.CTkLabel(status_row, text="✅", font=self.normal_font).pack(side="left", padx=(0, 15))
         ctk.CTkLabel(status_row, text="Status:", width=100, anchor="w", font=self.normal_font).pack(side="left")
         
         self.status_label = ctk.CTkLabel(
@@ -396,6 +407,9 @@ class ServerGUI(ctk.CTk):
 
         # Add file transfer service
         self.file_transfer_service = FileTransferService()
+        
+        # Add window thumbnails service
+        self.window_thumbnails_service = WindowThumbnailsService()
 
         # Apply PIN configuration to UI now that all elements are created
         self.apply_pin_configuration_to_ui()
@@ -859,6 +873,10 @@ class ServerGUI(ctk.CTk):
 
             # Stop file transfer service
             self.file_transfer_service.stop()
+            
+            # Stop window thumbnails service
+            if hasattr(self, 'window_thumbnails_service'):
+                self.window_thumbnails_service.stop()
         except Exception as e:
             logging.error(f"Error during cleanup: {e}")
         finally:
@@ -1172,17 +1190,36 @@ class ServerGUI(ctk.CTk):
             self.show_from_tray()
 
     def create_icon(self, text, color, size=(20, 20)):
-        """Create a FontAwesome icon"""
+        """Create a simple icon using PIL Image"""
         try:
-            # Load FontAwesome if available
-            from tkinter import font
-            if "FontAwesome" not in font.families():
-                return None
+            # Create a simple colored circle as an icon
+            from PIL import Image, ImageDraw
             
-            icon = ctk.CTkCanvas(self, width=size[0], height=size[1], highlightthickness=0)
-            icon.create_text(size[0]/2, size[1]/2, text=text, fill=color, font=("FontAwesome", 16))
-            return icon
-        except:
+            # Create a square image with transparency
+            image = Image.new('RGBA', size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            
+            # Parse color if it's a hex string
+            if isinstance(color, str) and color.startswith('#'):
+                color = tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            elif isinstance(color, str):
+                # Default colors for common color names
+                color_map = {
+                    '#7EB6FF': (126, 182, 255),
+                    '#FFD166': (255, 209, 102),
+                    '#4CAF50': (76, 175, 80)
+                }
+                color = color_map.get(color, (100, 100, 100))
+            
+            # Draw a simple circle
+            margin = 2
+            draw.ellipse([margin, margin, size[0]-margin, size[1]-margin], fill=color)
+            
+            # Convert to CTkImage
+            return ctk.CTkImage(light_image=image, dark_image=image, size=size)
+        except Exception as e:
+            logging.error(f"Error creating icon: {e}")
+            # Return None if icon creation fails
             return None
 
     def create_gradient_button(self, parent, text, command, gradient=None, icon=None):

@@ -133,6 +133,7 @@ server/
    - Ensure you're running as Administrator
    - Check if another instance is already running
    - Verify Python and dependencies are installed
+   - If you get a canvas error, ensure all dependencies from requirements.txt are installed
 
 2. **Connection issues**
    - Check firewall settings
@@ -142,6 +143,11 @@ server/
 3. **Screen sharing not working**
    - Ensure you have the latest graphics drivers
    - Check Windows display settings
+
+4. **PyInstaller build issues**
+   - Ensure all dependencies are installed: `pip install -r requirements.txt`
+   - Use the provided `server_gui.spec` file for building
+   - Run: `pyinstaller --clean server_gui.spec`
 
 ### Logs
 
