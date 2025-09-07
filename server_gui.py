@@ -1,3 +1,11 @@
+"""
+AnyCommand Windows Server GUI
+Copyright (c) 2024 AnyCommand
+MIT License - see LICENSE file for details
+
+GUI application for the AnyCommand Windows Server.
+"""
+
 import customtkinter as ctk
 import socket
 import pyautogui
@@ -24,10 +32,15 @@ import winerror
 import win32security
 import psutil
 from pystray import Icon as TrayIcon, Menu as TrayMenu, MenuItem as TrayMenuItem
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import shutil
 from file_transfer_service import FileTransferService
 import webbrowser
+import qrcode
+from io import BytesIO
+import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # Update mutex name
 MUTEX_NAME = "Global\\AnyCommandServer_SingleInstance"
@@ -46,6 +59,324 @@ def kill_other_instances():
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
 
+class UpdateChecker:
+    """Handles server update checking and notifications"""
+    
+    def __init__(self, parent_gui):
+        self.parent_gui = parent_gui
+        self.current_version = "1.2.7"  # Current server version
+        self.firebase_app = None
+        self.db = None
+        self.update_banner = None
+        self.update_info = None
+        
+    def initialize_firebase(self):
+        """Initialize Firebase connection using service account key"""
+        try:
+            # Try to initialize Firebase if not already done
+            if not firebase_admin._apps:
+                # For now, we'll use a simple HTTP request approach instead of Firebase Admin
+                # since we don't want to bundle service account keys
+                print("Firebase Admin SDK not configured - using HTTP fallback")
+                return False
+            return True
+        except Exception as e:
+            print(f"Firebase initialization failed: {e}")
+            return False
+    
+    def check_for_updates(self):
+        """Check for server updates using multiple fallback methods"""
+        try:
+            print(f"Checking for server updates... Current version: {self.current_version}")
+            
+            # Method 1: Try simple HTTP endpoint first (most reliable)
+            if self._check_updates_via_http():
+                return True
+            
+            # Method 2: Try GitHub releases API as fallback
+            if self._check_updates_via_github():
+                return True
+            
+            # Method 3: Try Firebase as last resort (might fail due to auth)
+            if self._check_updates_via_firebase():
+                return True
+            
+            print("Server is up to date (or all update sources failed)")
+            return False
+                
+        except Exception as e:
+            print(f"Error checking for updates: {e}")
+            return False
+    
+    def _check_updates_via_http(self):
+        """Check for updates using simple HTTP endpoint"""
+        try:
+            # Simple JSON endpoint that doesn't require authentication
+            update_url = "https://anycommand.io/api/server-version.json"
+            
+            response = requests.get(update_url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                
+                latest_version = data.get('version', '')
+                download_url = data.get('download_url', 'https://anycommand.io/download')
+                changelog = data.get('changelog', [])
+                
+                print(f"HTTP endpoint - Latest server version: {latest_version}")
+                
+                if latest_version and self.is_newer_version(latest_version, self.current_version):
+                    print("New server version available via HTTP!")
+                    
+                    self.update_info = {
+                        'version': latest_version,
+                        'download_url': download_url,
+                        'changelog': changelog
+                    }
+                    
+                    self.show_update_banner()
+                    return True
+            else:
+                print(f"HTTP endpoint failed: {response.status_code}")
+                
+        except Exception as e:
+            print(f"HTTP update check failed: {e}")
+        
+        return False
+    
+    def _check_updates_via_github(self):
+        """Check for updates using GitHub releases API"""
+        try:
+            # GitHub releases API (public, no auth required)
+            github_url = "https://api.github.com/repos/Ince88/anycommand-windows-server/releases/latest"
+            
+            headers = {
+                'Accept': 'application/vnd.github.v3+json',
+                'User-Agent': 'AnyCommand-Server-UpdateChecker'
+            }
+            
+            response = requests.get(github_url, headers=headers, timeout=10)
+            print(f"GitHub API response: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                latest_version = data.get('tag_name', '').lstrip('v')
+                download_url = data.get('html_url', 'https://anycommand.io/download')
+                
+                # Parse changelog from release body
+                changelog_text = data.get('body', 'No changelog available')
+                changelog = []
+                if changelog_text and changelog_text.strip():
+                    # Split by lines and clean up
+                    lines = [line.strip() for line in changelog_text.split('\n') if line.strip()]
+                    changelog = lines[:5]  # Limit to first 5 lines
+                else:
+                    changelog = ['No changelog available']
+                
+                print(f"GitHub API - Latest server version: {latest_version}")
+                print(f"GitHub API - Release URL: {download_url}")
+                
+                if latest_version and self.is_newer_version(latest_version, self.current_version):
+                    print("New server version available via GitHub!")
+                    
+                    # Use the actual release download URL if available
+                    assets = data.get('assets', [])
+                    if assets:
+                        # Look for Windows executable or installer
+                        for asset in assets:
+                            asset_name = asset.get('name', '').lower()
+                            if any(ext in asset_name for ext in ['.exe', '.msi', '.zip']):
+                                download_url = asset.get('browser_download_url', download_url)
+                                print(f"Found release asset: {asset_name}")
+                                break
+                    
+                    self.update_info = {
+                        'version': latest_version,
+                        'download_url': download_url,
+                        'changelog': changelog
+                    }
+                    
+                    self.show_update_banner()
+                    return True
+                else:
+                    print("No newer version found on GitHub")
+            elif response.status_code == 404:
+                print("GitHub repository not found - check the repository URL")
+            elif response.status_code == 403:
+                print("GitHub API rate limit exceeded - try again later")
+            else:
+                print(f"GitHub API failed: {response.status_code}")
+                
+        except Exception as e:
+            print(f"GitHub update check failed: {e}")
+        
+        return False
+    
+    def _check_updates_via_firebase(self):
+        """Check for updates using Firebase REST API (fallback)"""
+        try:
+            # Firebase REST API (might fail due to security rules)
+            firebase_url = "https://firestore.googleapis.com/v1/projects/anycommand-app/databases/(default)/documents/server_updates/latest"
+            
+            response = requests.get(firebase_url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract server_version from Firebase document
+                if 'fields' in data and 'server_version' in data['fields']:
+                    latest_version = data['fields']['server_version']['stringValue']
+                    
+                    print(f"Firebase API - Latest server version: {latest_version}")
+                    
+                    if self.is_newer_version(latest_version, self.current_version):
+                        print("New server version available via Firebase!")
+                        
+                        # Extract additional info
+                        download_url = "https://anycommand.io/download"
+                        changelog = []
+                        
+                        if 'server_download_url' in data['fields']:
+                            download_url = data['fields']['server_download_url']['stringValue']
+                        
+                        if 'server_changelog' in data['fields']:
+                            changelog_data = data['fields']['server_changelog']
+                            if 'arrayValue' in changelog_data and 'values' in changelog_data['arrayValue']:
+                                changelog = [item['stringValue'] for item in changelog_data['arrayValue']['values']]
+                        
+                        self.update_info = {
+                            'version': latest_version,
+                            'download_url': download_url,
+                            'changelog': changelog
+                        }
+                        
+                        self.show_update_banner()
+                        return True
+            else:
+                print(f"Firebase API failed: HTTP {response.status_code}")
+                
+        except Exception as e:
+            print(f"Firebase update check failed: {e}")
+        
+        return False
+    
+    def is_newer_version(self, new_version, current_version):
+        """Compare version strings (e.g., '1.3.0' vs '1.2.7')"""
+        try:
+            # Remove 'v' prefix if present
+            new_version = new_version.lstrip('v')
+            current_version = current_version.lstrip('v')
+            
+            new_parts = [int(x) for x in new_version.split('.')]
+            current_parts = [int(x) for x in current_version.split('.')]
+            
+            # Pad shorter version with zeros
+            while len(new_parts) < len(current_parts):
+                new_parts.append(0)
+            while len(current_parts) < len(new_parts):
+                current_parts.append(0)
+            
+            # Compare each part
+            for new_part, current_part in zip(new_parts, current_parts):
+                if new_part > current_part:
+                    return True
+                elif new_part < current_part:
+                    return False
+            
+            return False  # Versions are equal
+        except Exception as e:
+            print(f"Error comparing versions: {e}")
+            return False
+    
+    def show_update_banner(self):
+        """Show update banner in the GUI"""
+        if self.update_banner is not None:
+            return  # Banner already shown
+        
+        try:
+            # Create update banner frame
+            self.update_banner = ctk.CTkFrame(
+                self.parent_gui,
+                height=50,
+                fg_color="#2A5A2A",  # Green background
+                corner_radius=8,
+                border_width=1,
+                border_color="#4CAF50"
+            )
+            self.update_banner.pack(fill="x", padx=10, pady=(5, 0))
+            self.update_banner.pack_propagate(False)
+            
+            # Banner content frame
+            content_frame = ctk.CTkFrame(self.update_banner, fg_color="transparent")
+            content_frame.pack(fill="both", expand=True, padx=10, pady=5)
+            
+            # Update icon and text
+            update_text = f"🔄 Server update available: v{self.update_info['version']}"
+            update_label = ctk.CTkLabel(
+                content_frame,
+                text=update_text,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color="#FFFFFF"
+            )
+            update_label.pack(side="left", pady=5)
+            
+            # Buttons frame
+            buttons_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+            buttons_frame.pack(side="right", pady=2)
+            
+            # Download button
+            download_btn = ctk.CTkButton(
+                buttons_frame,
+                text="Download",
+                width=80,
+                height=28,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#4CAF50",
+                hover_color="#45A049",
+                command=self.download_update
+            )
+            download_btn.pack(side="left", padx=(0, 5))
+            
+            # Dismiss button
+            dismiss_btn = ctk.CTkButton(
+                buttons_frame,
+                text="✕",
+                width=28,
+                height=28,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#666666",
+                hover_color="#777777",
+                command=self.dismiss_banner
+            )
+            dismiss_btn.pack(side="left")
+            
+            print("Update banner displayed")
+            
+        except Exception as e:
+            print(f"Error showing update banner: {e}")
+    
+    def download_update(self):
+        """Open download URL in browser"""
+        try:
+            if self.update_info and self.update_info.get('download_url'):
+                webbrowser.open(self.update_info['download_url'])
+                print(f"Opened download URL: {self.update_info['download_url']}")
+            else:
+                # Fallback to main download page
+                webbrowser.open("https://anycommand.io/download")
+                print("Opened fallback download page")
+        except Exception as e:
+            print(f"Error opening download URL: {e}")
+    
+    def dismiss_banner(self):
+        """Dismiss the update banner"""
+        try:
+            if self.update_banner:
+                self.update_banner.destroy()
+                self.update_banner = None
+                print("Update banner dismissed")
+        except Exception as e:
+            print(f"Error dismissing banner: {e}")
+
 class ServerGUI(ctk.CTk):
     def __init__(self):
         # Check for existing instance before initializing GUI
@@ -60,319 +391,42 @@ class ServerGUI(ctk.CTk):
         # Load preferences
         self.load_preferences()
         
-        # Apply a modern theme
-        self.configure(fg_color="#1E1E2E")  # Dark background with a hint of blue
+        # Modern rectangular window configuration
+        self.configure(fg_color="#1A1A1A")  # Clean dark background
         
-        # Configure window
+        # Configure window - compact rectangular design
         self.title("Any Command Server")
-        self.geometry("400x650")  # Increased height to accommodate PIN configuration
-        self.resizable(True, True)
-        self.attributes('-alpha', 0.97)  # Slight transparency
+        self.geometry("320x400")  # Compact rectangular size
+        self.resizable(False, False)  # Fixed size for clean look
+        self.attributes('-alpha', 0.95)  # Slight transparency
         
-        # Set custom fonts
-        self.title_font = ("Segoe UI", 22, "bold")
-        self.heading_font = ("Segoe UI", 14, "bold")
-        self.normal_font = ("Segoe UI", 12)
-        self.small_font = ("Segoe UI", 11)
+        # Set custom fonts for compact design
+        self.title_font = ("Segoe UI", 16, "bold")
+        self.heading_font = ("Segoe UI", 12, "bold") 
+        self.normal_font = ("Segoe UI", 10)
+        self.small_font = ("Segoe UI", 9)
+        self.tiny_font = ("Segoe UI", 8)
         
-        # Allow window resizing
-        self.resizable(True, True)
+        # Animation and state variables
+        self.menu_open = False
+        self.animation_running = False
+        self.current_ip = "..."
+        self.current_pin = "..."
+        self.qr_image = None
         
-        # Set minimum window size to prevent layout issues
-        self.minsize(380, 600)    # Increased minimum height for PIN configuration
+        # Create the rectangular main container
+        self.create_rectangular_ui()
         
-        # Create main container with weight to allow proper resizing
-        main_container = ctk.CTkFrame(self, fg_color="transparent")
-        main_container.pack(fill="both", expand=True, padx=15, pady=12)  # Reduced padding
+        # Initialize update checker
+        self.update_checker = UpdateChecker(self)
         
-        # Use grid instead of pack for better resizing
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        main_container.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        # Make window draggable
+        self.bind('<Button-1>', self.start_move)
+        self.bind('<B1-Motion>', self.do_move)
+        self.bind('<ButtonRelease-1>', self.stop_move)
         
-        # Header with logo and title
-        header = ctk.CTkFrame(main_container, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
-        
-        # Try to load logo image
-        try:
-            # Use the robust icon loading method that handles packaged applications
-            logo_image_pil = self.load_app_icon()
-            if logo_image_pil:
-                logo_image = ctk.CTkImage(logo_image_pil, size=(48, 48))
-                logo_label = ctk.CTkLabel(header, image=logo_image, text="")
-                logo_label.pack(side="left", padx=(0, 15))
-        except Exception as e:
-            logging.error(f"Failed to load logo: {e}")
-        
-        # App title
-        title_label = ctk.CTkLabel(
-            header, 
-            text="Any Command Server",
-            font=self.title_font,
-            text_color="#C0E1FF"  # Light blue text
-        )
-        title_label.pack(side="left", fill="x", expand=True, pady=(0, 8))  # Reduced top padding
-        
-        # Status card
-        status_card = ctk.CTkFrame(
-            main_container,
-            fg_color="#262639",  # Slightly lighter background
-            corner_radius=15,
-            border_width=1,
-            border_color="#3D3D5C"  # Subtle border
-        )
-        status_card.pack(fill="x", pady=(0, 12), ipady=8)  # Reduced padding and internal padding
-        
-        # Card title
-        ctk.CTkLabel(
-            status_card,
-            text="CONNECTION STATUS",
-            font=self.heading_font,
-            text_color="#7EB6FF"  # Bright blue for headings
-        ).pack(pady=(15, 20))
-        
-        # Status indicators with better styling
-        status_container = ctk.CTkFrame(status_card, fg_color="transparent")
-        status_container.pack(fill="x", padx=25)
-        
-        # Status icons
-        icon_size = (24, 24)
-        network_icon = self.create_icon("\uf1eb", "#7EB6FF", icon_size)  # WiFi icon
-        key_icon = self.create_icon("\uf084", "#FFD166", icon_size)      # Key icon
-        status_icon = self.create_icon("\uf058", "#4CAF50", icon_size)   # Check icon
-        
-        # IP Address
-        ip_row = ctk.CTkFrame(status_container, fg_color="transparent")
-        ip_row.pack(fill="x", pady=(8, 4))  # Reduced padding
-        
-        ctk.CTkLabel(ip_row, image=network_icon, text="").pack(side="left", padx=(0, 15))
-        ctk.CTkLabel(ip_row, text="IP Address:", width=100, anchor="w", font=self.normal_font).pack(side="left")
-        
-        self.ip_label = ctk.CTkLabel(
-            ip_row,
-            text="Connecting...",
-            font=self.normal_font,
-            fg_color="#31314A",
-            corner_radius=6,
-            height=32,
-            anchor="w",
-            padx=10
-        )
-        self.ip_label.pack(side="left", fill="x", expand=True)
-        
-        # PIN
-        pin_row = ctk.CTkFrame(status_container, fg_color="transparent")
-        pin_row.pack(fill="x", pady=(8, 4))  # Reduced padding
-        
-        ctk.CTkLabel(pin_row, image=key_icon, text="").pack(side="left", padx=(0, 15))
-        ctk.CTkLabel(pin_row, text="PIN Code:", width=100, anchor="w", font=self.normal_font).pack(side="left")
-        
-        self.pin_label = ctk.CTkLabel(
-            pin_row,
-            text="------",
-            font=self.normal_font,
-            fg_color="#31314A",
-            corner_radius=6,
-            height=32,
-            anchor="w",
-            padx=10
-        )
-        self.pin_label.pack(side="left", fill="x", expand=True)
-        
-        # Server Status
-        status_row = ctk.CTkFrame(main_container, fg_color="transparent")
-        status_row.pack(fill="x", pady=(0, 8))  # Reduced padding
-        
-        ctk.CTkLabel(status_row, image=status_icon, text="").pack(side="left", padx=(0, 15))
-        ctk.CTkLabel(status_row, text="Status:", width=100, anchor="w", font=self.normal_font).pack(side="left")
-        
-        self.status_label = ctk.CTkLabel(
-            status_row,
-            text="Starting...",
-            font=("Segoe UI", 11),  # Smaller font
-            fg_color="#1E5B2D",
-            text_color="#AAFFAA",
-            corner_radius=4,  # Less rounded corners
-            height=26,  # Smaller height
-            anchor="w",
-            padx=8
-        )
-        self.status_label.pack(side="left", fill="x", expand=True)
-        
-        # PIN Configuration Section
-        pin_config_card = ctk.CTkFrame(
-            main_container,
-            fg_color="#262639",  # Slightly lighter background
-            corner_radius=15,
-            border_width=1,
-            border_color="#3D3D5C"  # Subtle border
-        )
-        pin_config_card.pack(fill="x", pady=(12, 0), ipady=8)
-        
-        # PIN Config title
-        ctk.CTkLabel(
-            pin_config_card,
-            text="PIN CONFIGURATION",
-            font=self.heading_font,
-            text_color="#7EB6FF"  # Bright blue for headings
-        ).pack(pady=(15, 10))
-        
-        # PIN mode selection frame
-        pin_mode_frame = ctk.CTkFrame(pin_config_card, fg_color="transparent")
-        pin_mode_frame.pack(fill="x", padx=25, pady=(0, 10))
-        
-        # PIN mode toggle
-        pin_mode_row = ctk.CTkFrame(pin_mode_frame, fg_color="transparent")
-        pin_mode_row.pack(fill="x", pady=(0, 10))
-        
-        # Random PIN mode switch
-        ctk.CTkLabel(pin_mode_row, text="PIN Mode:", font=self.normal_font, anchor="w").pack(side="left")
-        
-        # Use saved preference for PIN mode, default to True (Random) if not found
-        pin_mode_default = self.preferences.get('use_random_pin', True)
-        self.pin_mode_var = ctk.BooleanVar(value=pin_mode_default)
-        self.pin_mode_switch = ctk.CTkSwitch(
-            pin_mode_row,
-            text="Random PIN",
-            variable=self.pin_mode_var,
-            font=self.small_font,
-            command=self.on_pin_mode_changed
-        )
-        self.pin_mode_switch.pack(side="right")
-        
-        # PIN mode info label
-        self.pin_mode_info = ctk.CTkLabel(
-            pin_mode_frame,
-            text="Random PIN mode: Server generates a new PIN each restart (More Secure)",
-            font=self.small_font,
-            text_color="#AAB2BD",
-            anchor="w",
-            wraplength=350,
-            justify="left"
-        )
-        self.pin_mode_info.pack(fill="x", pady=(0, 10))
-        
-        # Custom PIN input frame (initially hidden)
-        self.custom_pin_frame = ctk.CTkFrame(pin_mode_frame, fg_color="transparent")
-        
-        custom_pin_row = ctk.CTkFrame(self.custom_pin_frame, fg_color="transparent")
-        custom_pin_row.pack(fill="x", pady=(0, 8))
-        
-        ctk.CTkLabel(custom_pin_row, text="Custom PIN:", font=self.normal_font, anchor="w").pack(side="left")
-        
-        self.custom_pin_entry = ctk.CTkEntry(
-            custom_pin_row,
-            placeholder_text="Enter 6-digit PIN",
-            font=self.normal_font,
-            width=120,
-            justify="center"
-        )
-        self.custom_pin_entry.pack(side="right")
-        self.custom_pin_entry.bind('<KeyRelease>', self.on_custom_pin_changed)
-        
-        # Custom PIN save button
-        self.save_pin_button = ctk.CTkButton(
-            self.custom_pin_frame,
-            text="Apply PIN Settings",
-            font=self.small_font,
-            height=28,
-            command=self.save_pin_configuration,
-            fg_color="#28a745",
-            hover_color="#218838"
-        )
-        self.save_pin_button.pack(pady=(5, 0))
-        
-        # Add restart server button for PIN changes
-        restart_button = ctk.CTkButton(
-            pin_config_card,
-            text="🔄 Restart Server",
-            font=self.normal_font,
-            height=32,
-            command=self.restart_server,
-            fg_color="#007bff",
-            hover_color="#0056b3"
-        )
-        restart_button.pack(pady=(10, 15))
-        
-        # Now add a row of buttons for all functions
-        buttons_frame = ctk.CTkFrame(main_container, fg_color="transparent")
-        buttons_frame.pack(fill="x", pady=(10, 0))
-        
-        # First row of buttons
-        first_row = ctk.CTkFrame(buttons_frame, fg_color="transparent")
-        first_row.pack(fill="x", pady=(0, 8))  # Reduced padding
-        
-        # How to Connect button
-        help_button = self.create_gradient_button(
-            first_row,
-            "How to Connect",
-            self.show_instructions,
-            gradient=["#3867d6", "#4b7bec"],  # Professional blue
-        )
-        help_button.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        
-        # Open folder button
-        open_folder_button = self.create_gradient_button(
-            first_row,
-            "Open Transfer Folder",
-            self.open_transfer_directory,
-            gradient=["#20bf6b", "#26de81"],  # Professional green
-        )
-        open_folder_button.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        
-        # Second row of buttons
-        second_row = ctk.CTkFrame(buttons_frame, fg_color="transparent")
-        second_row.pack(fill="x", pady=(0, 8))  # Add padding between rows
-        
-        # Settings button
-        settings_button = self.create_gradient_button(
-            second_row,
-            "Settings",
-            self.show_settings,
-            gradient=["#f39c12", "#e67e22"],  # Professional orange
-        )
-        settings_button.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        
-        # Online Help button (new)
-        online_help_button = self.create_gradient_button(
-            second_row,
-            "Help",
-            self.open_help_page,
-            gradient=["#8e44ad", "#9b59b6"],  # Professional purple
-        )
-        online_help_button.pack(side="left", fill="x", expand=True, padx=(4, 4))
-        
-        # Minimize button
-        minimize_button = self.create_gradient_button(
-            second_row,
-            "Minimize to Tray",
-            self.minimize_window,
-            gradient=["#4b6584", "#778ca3"],  # Professional slate
-        )
-        minimize_button.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        
-        # Third row of buttons
-        third_row = ctk.CTkFrame(buttons_frame, fg_color="transparent")
-        third_row.pack(fill="x")
-        
-        # Exit button (moved to its own row)
-        quit_button = self.create_gradient_button(
-            third_row,
-            "Exit",
-            self.quit_app,
-            gradient=["#eb3b5a", "#fc5c65"],  # Professional red
-        )
-        quit_button.pack(fill="x", expand=True)
-        
-        # Version info at bottom
-        version_label = ctk.CTkLabel(
-            main_container,
-            text="v1.2.7",
-            font=("Segoe UI", 9),  # Smaller font
-            text_color="#4D4D6F"  # More subtle color
-        )
-        version_label.pack(side="right", pady=(8, 0))  # Less padding
+        # Add right-click context menu as backup
+        self.bind('<Button-3>', self.show_context_menu)
         
         # Start server in separate thread
         self.server = None
@@ -396,6 +450,14 @@ class ServerGUI(ctk.CTk):
 
         # Add file transfer service
         self.file_transfer_service = FileTransferService()
+        
+        # Add window thumbnails service
+        try:
+            from window_thumbnails_service import WindowThumbnailsService
+            self.window_thumbnails_service = WindowThumbnailsService()
+        except ImportError:
+            logging.warning("WindowThumbnailsService not available")
+            self.window_thumbnails_service = None
 
         # Apply PIN configuration to UI now that all elements are created
         self.apply_pin_configuration_to_ui()
@@ -404,6 +466,340 @@ class ServerGUI(ctk.CTk):
         use_random_pin = self.preferences.get('use_random_pin', True)
         custom_pin = self.preferences.get('custom_pin', '')
         logging.info(f"Loaded PIN configuration: use_random_pin={use_random_pin}, has_custom_pin={bool(custom_pin)}")
+
+    def create_rectangular_ui(self):
+        """Create clean rectangular UI layout"""
+        # Header section
+        header_frame = ctk.CTkFrame(
+            self,
+            height=80,
+            fg_color="#2A2A2A",
+            corner_radius=10,
+            border_width=1,
+            border_color="#444444"
+        )
+        header_frame.pack(fill="x", padx=10, pady=(10, 5))
+        header_frame.pack_propagate(False)
+        
+        # Status indicator and title in header
+        status_container = ctk.CTkFrame(header_frame, fg_color="transparent")
+        status_container.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Title and status
+        title_label = ctk.CTkLabel(
+            status_container,
+            text="Any Command Server",
+            font=self.title_font,
+            text_color="#FFFFFF"
+        )
+        title_label.pack(side="left")
+        
+        # Status indicator
+        self.status_indicator = ctk.CTkFrame(
+            status_container,
+            width=12,
+            height=12,
+            corner_radius=6,
+            fg_color="#4CAF50"  # Green when running
+        )
+        self.status_indicator.pack(side="right", padx=(0, 10))
+        
+        # Hamburger menu button
+        self.hamburger_btn = ctk.CTkButton(
+            status_container,
+            text="☰",
+            width=30,
+            height=30,
+            corner_radius=8,
+            font=("Segoe UI", 16, "bold"),
+            fg_color="#555555",
+            hover_color="#666666",
+            text_color="#FFFFFF",
+            command=self.toggle_menu
+        )
+        self.hamburger_btn.pack(side="right", padx=(0, 5))
+        
+        # Main content area
+        content_frame = ctk.CTkFrame(
+            self,
+            fg_color="#2A2A2A",
+            corner_radius=10,
+            border_width=1,
+            border_color="#444444"
+        )
+        content_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Connection info section
+        info_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+        info_frame.pack(fill="x", padx=15, pady=15)
+        
+        # IP Address display
+        self.ip_label = ctk.CTkLabel(
+            info_frame,
+            text="IP: ...",
+            font=self.normal_font,
+            text_color="#FFFFFF"
+        )
+        self.ip_label.pack(anchor="w")
+        
+        # PIN display (prominent)
+        self.pin_label = ctk.CTkLabel(
+            info_frame,
+            text="PIN: ------",
+            font=self.heading_font,
+            text_color="#00D4FF"  # Bright cyan for PIN
+        )
+        self.pin_label.pack(anchor="w", pady=(5, 0))
+        
+        # QR Code section
+        qr_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+        qr_frame.pack(fill="x", padx=15, pady=(0, 15))
+        
+        # QR Code placeholder
+        self.qr_label = ctk.CTkLabel(
+            qr_frame,
+            text="📱 QR Code",
+            font=("Segoe UI", 24),
+            text_color="#666666"
+        )
+        self.qr_label.pack()
+        
+        # Action buttons section
+        buttons_frame = ctk.CTkFrame(
+            self,
+            height=100,
+            fg_color="#2A2A2A",
+            corner_radius=10,
+            border_width=1,
+            border_color="#444444"
+        )
+        buttons_frame.pack(fill="x", padx=10, pady=(0, 10))
+        buttons_frame.pack_propagate(False)
+        
+        # Button grid
+        button_container = ctk.CTkFrame(buttons_frame, fg_color="transparent")
+        button_container.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Top row buttons
+        top_row = ctk.CTkFrame(button_container, fg_color="transparent")
+        top_row.pack(fill="x", pady=(0, 5))
+        
+        # Transfer Folder button
+        self.transfer_btn = ctk.CTkButton(
+            top_row,
+            text="📁 Transfer Folder",
+            width=140,
+            height=35,
+            corner_radius=8,
+            font=self.normal_font,
+            fg_color="#444444",
+            hover_color="#555555",
+            text_color="#FFFFFF",
+            command=self.open_transfer_directory
+        )
+        self.transfer_btn.pack(side="left", padx=(0, 5))
+        
+        # Restart Server button
+        self.restart_btn = ctk.CTkButton(
+            top_row,
+            text="🔄 Restart",
+            width=140,
+            height=35,
+            corner_radius=8,
+            font=self.normal_font,
+            fg_color="#444444",
+            hover_color="#555555",
+            text_color="#FFFFFF",
+            command=self.restart_server
+        )
+        self.restart_btn.pack(side="right")
+        
+        # Bottom row buttons
+        bottom_row = ctk.CTkFrame(button_container, fg_color="transparent")
+        bottom_row.pack(fill="x")
+        
+        # Minimize to Tray button
+        self.minimize_btn = ctk.CTkButton(
+            bottom_row,
+            text="📱 Minimize",
+            width=140,
+            height=35,
+            corner_radius=8,
+            font=self.normal_font,
+            fg_color="#444444",
+            hover_color="#555555",
+            text_color="#FFFFFF",
+            command=self.minimize_window
+        )
+        self.minimize_btn.pack(side="left", padx=(0, 5))
+        
+        # Exit button
+        self.exit_btn = ctk.CTkButton(
+            bottom_row,
+            text="❌ Exit",
+            width=140,
+            height=35,
+            corner_radius=8,
+            font=self.normal_font,
+            fg_color="#AA4444",
+            hover_color="#BB5555",
+            text_color="#FFFFFF",
+            command=self.quit_app
+        )
+        self.exit_btn.pack(side="right")
+        
+        # Version info at bottom
+        version_label = ctk.CTkLabel(
+            self,
+            text="v1.2.7",
+            font=self.tiny_font,
+            text_color="#666666"
+        )
+        version_label.pack(pady=(0, 5))
+        
+        # Hidden menu container (initially not visible)
+        self.create_hidden_menu()
+
+    def create_hidden_menu(self):
+        """Create the expandable menu that appears when hamburger is clicked"""
+        self.menu_window = None  # Will be created when needed
+    def toggle_menu(self):
+        """Toggle the hamburger menu"""
+        if hasattr(self, 'animation_running') and self.animation_running:
+            return
+            
+        if self.menu_window is None:
+            self.show_menu()
+        else:
+            self.hide_menu()
+
+    def show_menu(self):
+        """Show the hamburger menu with all options"""
+        if self.menu_window is not None:
+            return
+            
+        # Create menu window positioned next to main window
+        self.menu_window = ctk.CTkToplevel(self)
+        self.menu_window.title("")
+        self.menu_window.geometry("180x160")
+        self.menu_window.resizable(False, False)
+        self.menu_window.configure(fg_color="#2A2A2A")
+        self.menu_window.overrideredirect(True)
+        
+        # Position menu to the right of main window
+        main_x = self.winfo_x()
+        main_y = self.winfo_y()
+        self.menu_window.geometry(f"180x160+{main_x + 330}+{main_y}")
+        
+        # Menu container with rounded corners
+        menu_container = ctk.CTkFrame(
+            self.menu_window,
+            fg_color="#2A2A2A",
+            corner_radius=10,
+            border_width=1,
+            border_color="#555555"
+        )
+        menu_container.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Menu title
+        ctk.CTkLabel(
+            menu_container,
+            text="MENU",
+            font=self.heading_font,
+            text_color="#00D4FF"
+        ).pack(pady=(15, 10))
+        
+        # Menu buttons (simplified - only 3 buttons)
+        self.create_menu_button(menu_container, "📖 How to Connect", self.show_instructions)
+        self.create_menu_button(menu_container, "⚙️ Settings", self.show_settings)
+        self.create_menu_button(menu_container, "❓ Help", self.open_help_page)
+        
+        # Click outside to close
+        self.menu_window.bind('<FocusOut>', lambda e: self.hide_menu())
+        self.menu_window.focus_set()
+
+    def create_menu_button(self, parent, text, command):
+        """Create a menu button with enhanced styling"""
+        btn = ctk.CTkButton(
+            parent,
+            text=text,
+            command=lambda: [command(), self.hide_menu()],
+            font=self.normal_font,
+            height=40,  # Slightly taller
+            corner_radius=12,  # More rounded
+            fg_color="#333333",
+            hover_color="#444444",
+            text_color="#FFFFFF",
+            border_width=1,
+            border_color="#555555",
+            anchor="w"
+        )
+        btn.pack(fill="x", padx=12, pady=3)  # Better spacing
+        return btn
+
+    def hide_menu(self):
+        """Hide the hamburger menu"""
+        if self.menu_window is not None:
+            self.menu_window.destroy()
+            self.menu_window = None
+
+    def show_context_menu(self, event):
+        """Show context menu on right-click as backup"""
+        self.show_menu()
+    def generate_qr_code(self, ip, pin):
+        """Generate QR code for easy connection"""
+        try:
+            # Create connection string for mobile app
+            connection_data = f"anycommand://{ip}:{8000}?pin={pin}"
+            
+            # Generate QR code
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=3,
+                border=1,
+            )
+            qr.add_data(connection_data)
+            qr.make(fit=True)
+            
+            # Create QR code image
+            qr_img = qr.make_image(fill_color="white", back_color="transparent")
+            
+            # Resize for display (larger)
+            qr_img = qr_img.resize((100, 100), Image.Resampling.LANCZOS)
+            
+            # Convert to CTkImage
+            self.qr_image = ctk.CTkImage(qr_img, size=(100, 100))
+            
+            # Update QR label
+            if hasattr(self, 'qr_label'):
+                self.qr_label.configure(image=self.qr_image, text="")
+                
+        except Exception as e:
+            logging.error(f"Error generating QR code: {e}")
+            # Fallback to emoji if QR generation fails
+            if hasattr(self, 'qr_label'):
+                self.qr_label.configure(image=None, text="📱")
+
+    # Window dragging methods for borderless window
+    def start_move(self, event):
+        """Start window dragging"""
+        self.x = event.x
+        self.y = event.y
+
+    def stop_move(self, event):
+        """Stop window dragging"""
+        self.x = None
+        self.y = None
+
+    def do_move(self, event):
+        """Handle window dragging"""
+        if hasattr(self, 'x') and hasattr(self, 'y'):
+            deltax = event.x - self.x
+            deltay = event.y - self.y
+            x = self.winfo_x() + deltax
+            y = self.winfo_y() + deltay
+            self.geometry(f"+{x}+{y}")
 
     def get_config_directory(self):
         """Get the appropriate directory for configuration files"""
@@ -481,6 +877,22 @@ class ServerGUI(ctk.CTk):
         self.server_thread = threading.Thread(target=self.start_server)
         self.server_thread.daemon = True
         self.server_thread.start()
+        
+        # Check for updates in background after server starts
+        self.check_updates_thread = threading.Thread(target=self.check_for_updates_background)
+        self.check_updates_thread.daemon = True
+        self.check_updates_thread.start()
+
+    def check_for_updates_background(self):
+        """Check for updates in background thread"""
+        try:
+            # Wait a bit for server to fully start
+            time.sleep(3)
+            
+            print("Starting background update check...")
+            self.update_checker.check_for_updates()
+        except Exception as e:
+            print(f"Background update check failed: {e}")
 
     def start_move(self, event):
         self.x = event.x
@@ -516,9 +928,28 @@ class ServerGUI(ctk.CTk):
         return ips or ["127.0.0.1"]
 
     def update_status(self, ip, pin, status):
-        self.ip_label.configure(text=f"📡 IP: {ip}")
-        self.pin_label.configure(text=f"🔑 PIN: {pin}")
-        self.status_label.configure(text=f"📊 Status: {status}")
+        """Update the compact UI with new connection info"""
+        self.current_ip = ip
+        self.current_pin = pin
+        
+        # Update labels
+        if hasattr(self, 'ip_label'):
+            self.ip_label.configure(text=f"IP: {ip}")
+        if hasattr(self, 'pin_label'):
+            self.pin_label.configure(text=f"PIN: {pin}")
+            
+        # Update status indicator color
+        if hasattr(self, 'status_indicator'):
+            if "Running" in status:
+                self.status_indicator.configure(fg_color="#4CAF50")  # Green
+            elif "Starting" in status:
+                self.status_indicator.configure(fg_color="#FF9800")  # Orange
+            else:
+                self.status_indicator.configure(fg_color="#F44336")  # Red
+        
+        # Generate QR code with new info
+        if ip != "..." and pin != "...":
+            self.generate_qr_code(ip, pin)
 
     def start_server(self):
         try:
@@ -548,7 +979,10 @@ class ServerGUI(ctk.CTk):
 
             # Start file transfer service
             self.file_transfer_service.start()
-            self.window_thumbnails_service.start()
+            
+            # Start window thumbnails service if available
+            if self.window_thumbnails_service:
+                self.window_thumbnails_service.start()
         except Exception as e:
             self.update_status("Error", "Error", f"Failed: {str(e)}")
             logging.error(f"Error starting server: {e}")
@@ -859,6 +1293,10 @@ class ServerGUI(ctk.CTk):
 
             # Stop file transfer service
             self.file_transfer_service.stop()
+            
+            # Stop window thumbnails service if available
+            if hasattr(self, 'window_thumbnails_service') and self.window_thumbnails_service:
+                self.window_thumbnails_service.stop()
         except Exception as e:
             logging.error(f"Error during cleanup: {e}")
         finally:
@@ -897,14 +1335,14 @@ class ServerGUI(ctk.CTk):
         """Load the application icon file"""
         # First check in the same directory as the executable (install location)
         executable_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(executable_dir, 'icon.ico')
+        icon_path = os.path.join(executable_dir, 'icon2.ico')
         
         # For PyInstaller bundled applications, check for bundled data
         if getattr(sys, 'frozen', False):
             try:
                 # PyInstaller creates a temp folder and stores path in _MEIPASS
                 bundle_dir = sys._MEIPASS
-                bundled_icon_path = os.path.join(bundle_dir, 'icon.ico')
+                bundled_icon_path = os.path.join(bundle_dir, 'icon2.ico')
                 if os.path.exists(bundled_icon_path):
                     logging.info(f"Loading icon from PyInstaller bundle: {bundled_icon_path}")
                     return Image.open(bundled_icon_path)
@@ -921,7 +1359,7 @@ class ServerGUI(ctk.CTk):
         
         # Look for icon in the server directory
         server_dir = os.path.dirname(os.path.abspath(__file__))
-        server_icon_path = os.path.join(server_dir, 'icon.ico')
+        server_icon_path = os.path.join(server_dir, 'icon2.ico')
         
         if os.path.exists(server_icon_path) and server_icon_path != icon_path:
             try:
@@ -933,7 +1371,7 @@ class ServerGUI(ctk.CTk):
         # If all fails, try to find it in the installer directory
         try:
             installer_dir = os.path.join(os.path.dirname(server_dir), 'installer')
-            installer_icon = os.path.join(installer_dir, 'icon.ico')
+            installer_icon = os.path.join(installer_dir, 'icon2.ico')
             
             if os.path.exists(installer_icon):
                 try:
@@ -949,6 +1387,60 @@ class ServerGUI(ctk.CTk):
         # Fallback to creating a simple icon
         logging.warning("Could not find icon file, using generated icon")
         return self.create_tray_icon_image()
+
+    def load_gui_logo(self):
+        """Load the PNG logo for GUI display (better quality than ICO)"""
+        # First check in the same directory as the executable
+        executable_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+        png_path = os.path.join(executable_dir, 'icon2.png')
+        
+        # For PyInstaller bundled applications, check for bundled data
+        if getattr(sys, 'frozen', False):
+            try:
+                bundle_dir = sys._MEIPASS
+                bundled_png_path = os.path.join(bundle_dir, 'icon2.png')
+                if os.path.exists(bundled_png_path):
+                    logging.info(f"Loading PNG logo from PyInstaller bundle: {bundled_png_path}")
+                    return Image.open(bundled_png_path)
+            except Exception as e:
+                logging.error(f"Error loading PNG from bundle: {e}")
+        
+        # Try to load from the executable directory
+        if os.path.exists(png_path):
+            try:
+                logging.info(f"Loading PNG logo from executable directory: {png_path}")
+                return Image.open(png_path)
+            except Exception as e:
+                logging.error(f"Error loading PNG from {png_path}: {e}")
+        
+        # Look for PNG in the server directory
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        server_png_path = os.path.join(server_dir, 'icon2.png')
+        
+        if os.path.exists(server_png_path) and server_png_path != png_path:
+            try:
+                logging.info(f"Loading PNG logo from server directory: {server_png_path}")
+                return Image.open(server_png_path)
+            except Exception as e:
+                logging.error(f"Error loading PNG from {server_png_path}: {e}")
+        
+        # Try to find PNG in assets directory
+        try:
+            assets_dir = os.path.join(os.path.dirname(server_dir), 'assets', 'icon')
+            assets_png = os.path.join(assets_dir, 'icon2.png')
+            
+            if os.path.exists(assets_png):
+                try:
+                    logging.info(f"Loading PNG logo from assets directory: {assets_png}")
+                    return Image.open(assets_png)
+                except Exception as e:
+                    logging.error(f"Error loading PNG from assets: {e}")
+        except Exception:
+            pass
+        
+        # Fallback to the ICO version if PNG not found
+        logging.warning("PNG logo not found, falling back to ICO")
+        return self.load_app_icon()
 
     def create_tray_icon_image(self):
         """Create a simple square icon with AC text"""
@@ -1045,6 +1537,30 @@ class ServerGUI(ctk.CTk):
         )
         autostart_checkbox.pack(pady=(5, 10), padx=20, anchor="w")
         
+        # PIN Configuration section
+        pin_section = ctk.CTkFrame(settings_frame, fg_color="#31314A", corner_radius=10)
+        pin_section.pack(fill="x", pady=(0, 15))
+        
+        ctk.CTkLabel(
+            pin_section,
+            text="PIN Configuration",
+            font=self.normal_font,
+            text_color="#FFFFFF"
+        ).pack(pady=(10, 5))
+        
+        # PIN mode toggle
+        pin_mode_var = ctk.BooleanVar(value=self.preferences.get('use_random_pin', True))
+        pin_mode_checkbox = ctk.CTkCheckBox(
+            pin_section,
+            text="Use Random PIN (Recommended)",
+            variable=pin_mode_var,
+            font=self.small_font,
+            command=lambda: self._update_pin_mode_setting(pin_mode_var.get()),
+            fg_color="#2E7D32",
+            hover_color="#1B5E20"
+        )
+        pin_mode_checkbox.pack(pady=(5, 10), padx=20, anchor="w")
+        
         # Behavior section
         behavior_section = ctk.CTkFrame(settings_frame, fg_color="#31314A", corner_radius=10)
         behavior_section.pack(fill="x", pady=(0, 15))
@@ -1111,6 +1627,13 @@ class ServerGUI(ctk.CTk):
         self.save_preferences()
         mode_text = "enabled" if enabled else "disabled"
         self.show_notification("Settings", f"Auto-hide confirmation {mode_text}")
+
+    def _update_pin_mode_setting(self, use_random):
+        """Update the PIN mode setting"""
+        self.preferences['use_random_pin'] = use_random
+        self.save_preferences()
+        mode_text = "Random PIN" if use_random else "Custom PIN"
+        self.show_notification("PIN Mode", f"PIN mode set to: {mode_text}\nRestart server to apply changes")
 
     def get_autostart_setting(self):
         """Get autostart setting from Windows registry"""
@@ -1463,21 +1986,9 @@ class ServerGUI(ctk.CTk):
         
         logging.info(f"Applying PIN configuration to UI: use_random_pin={use_random_pin}, custom_pin={'***' if custom_pin else 'None'}")
         
-        # Set UI values if elements exist
-        if hasattr(self, 'pin_mode_var') and self.pin_mode_var:
-            self.pin_mode_var.set(use_random_pin)
-            logging.info(f"Set pin_mode_var to {use_random_pin}")
-        
-        # Set custom PIN value regardless of mode (for when user switches modes)
-        if hasattr(self, 'custom_pin_entry') and self.custom_pin_entry and custom_pin:
-            self.custom_pin_entry.delete(0, ctk.END)
-            self.custom_pin_entry.insert(0, custom_pin)
-            logging.info(f"Set custom PIN entry to saved value")
-        
-        # Update UI based on PIN mode (this will show/hide custom PIN fields)
-        if hasattr(self, 'update_pin_mode_ui'):
-            self.update_pin_mode_ui()
-            logging.info(f"Updated PIN mode UI for mode: {'Random' if use_random_pin else 'Custom'}")
+        # For the compact UI, we don't need to set UI elements since PIN configuration
+        # is handled in the settings menu. Just log the configuration.
+        logging.info(f"PIN configuration loaded for compact UI")
 
 if __name__ == "__main__":
     # Set up logging
