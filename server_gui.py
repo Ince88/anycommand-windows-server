@@ -118,7 +118,7 @@ class UpdateChecker:
             if response.status_code == 200:
                 data = response.json()
                 
-                latest_version = data.get('version', '')
+                latest_version = data.get('version', '1.2.8')
                 download_url = data.get('download_url', 'https://anycommand.io/download')
                 changelog = data.get('changelog', [])
                 
